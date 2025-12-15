@@ -24,7 +24,7 @@ services:
       test: ["CMD", "python", "-m",  "src.backend.server"]
       start_period: 1s
       interval: 1s
-      timeout: 2s
+      timeout: 3s
       retries: 10
     command: uvicorn src.backend.server:app --host 0.0.0.0 --port 8000
     depends_on:
@@ -42,19 +42,16 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./init-postgres.sh:/docker-entrypoint-initdb.d/init-postgres.sh
     command: >
-      sh -c "
-        chmod +x /docker-entrypoint-initdb.d/init-postgres.sh;
-        docker-entrypoint.sh postgres
-      "
+      sh -c "chmod +x /docker-entrypoint-initdb.d/init-postgres.sh; docker-entrypoint.sh postgres"
     ports:
       - "5432:5432"
     networks:
       - monitoring_network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ml_user -d cold_features"]
-      start_period: 1s
-      interval: 1s
-      timeout: 2s
+      start_period: 2s
+      interval: 2s
+      timeout: 3s
       retries: 10
 
   prometheus:
