@@ -1,0 +1,146 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ml_backend
+    ports:
+      - "8000:8000"
+    environment:
+      - WEIGHT_MODEL_PATH=/app/data/models/weight_model.cbm
+      - DIMENSIONS_MODEL_PATH=/app/data/models/dimensions_model.cbm
+      - LOG_LEVEL=info
+      - ENABLE_METRICS=true
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - ./data/:/app/data:ro
+      - ./ml_pipline/mlruns:/app/ml_pipline/mlruns
+    networks:
+      - monitoring_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-m",  "src.backend.server"]
+      start_period: 1s
+      interval: 1s
+      timeout: 2s
+      retries: 10
+    command: uvicorn src.backend.server:app --host 0.0.0.0 --port 8000
+    depends_on:
+      cold_feature_storage:
+        condition: service_healthy
+
+  cold_feature_storage:
+    image: postgres:15-alpine
+    container_name: cold_feature_storage
+    environment:
+      - POSTGRES_DB=cold_features
+      - POSTGRES_USER=ml_user
+      - POSTGRES_PASSWORD=ml_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-postgres.sh:/docker-entrypoint-initdb.d/init-postgres.sh
+    command: >
+      sh -c "
+        chmod +x /docker-entrypoint-initdb.d/init-postgres.sh;
+        docker-entrypoint.sh postgres
+      "
+    ports:
+      - "5432:5432"
+    networks:
+      - monitoring_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ml_user -d cold_features"]
+      start_period: 1s
+      interval: 1s
+      timeout: 2s
+      retries: 10
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-admin-api'
+      - '--web.enable-lifecycle'
+    networks:
+      - monitoring_network
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+    networks:
+      - monitoring_network
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
+  
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.11.0
+    container_name: mlflow
+    ports:
+      - "5000:5000"
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:///mlflow.db
+      --default-artifact-root /app/ml_pipline/mlruns
+      --host 0.0.0.0
+    volumes:
+      - ./ml_pipline/mlruns:/app/ml_pipline/mlruns
+    networks:
+      - monitoring_network
+    environment:
+      - MLFLOW_HOST_ALLOW=mlflow,localhost,127.0.0.1,ml-runner,backend
+
+  ml-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ml-runner
+    stdin_open: true
+    tty: true
+    command: bash
+    depends_on:
+      - mlflow
+    networks:
+      - monitoring_network
+    environment:
+    - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - ./ml_pipline/mlruns:/app/ml_pipline/mlruns
+      - ./ml_pipline:/app/ml_pipline
+
+networks:
+  monitoring_network:
+    driver: bridge
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  postgres_data:
